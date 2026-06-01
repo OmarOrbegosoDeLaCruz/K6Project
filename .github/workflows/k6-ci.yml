@@ -1,0 +1,130 @@
+name: k6 CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "Framework/**"
+      - "Tests/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/k6-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "Framework/**"
+      - "Tests/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/k6-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k6-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run-tests:
+    name: Run k6 tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Setup k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Show runtime versions
+        run: |
+          node --version
+          npm --version
+          k6 version
+
+      - name: Run k6 entrypoints
+        shell: bash
+        env:
+          DWH_INGESTION_URL: ${{ secrets.DWH_INGESTION_URL }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts/k6
+
+          google_scripts=(
+            "Tests/Google/loadTest.js"
+            "Tests/Google/stressTest.js"
+            "Tests/Google/spikeTest.js"
+            "Tests/Google/soakTest.js"
+          )
+
+          dwh_scripts=(
+            "Tests/DWH/ingestion.load.js"
+            "Tests/DWH/ingestion.stress.js"
+            "Tests/DWH/ingestion.soak.js"
+          )
+
+          run_k6_script() {
+            local script="$1"
+            safe_name="${script//\//__}"
+            echo "::group::k6 run ${script}"
+
+            k6 run \
+              --vus 1 \
+              --iterations 1 \
+              --summary-export "artifacts/k6/${safe_name}-summary.json" \
+              "${script}" | tee "artifacts/k6/${safe_name}.log"
+
+            node -e '
+              const fs = require("fs");
+              const [summaryPath, script] = process.argv.slice(1);
+              const summary = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+              const checks = summary.metrics?.checks;
+              const failedChecks = checks?.fails || 0;
+
+              if (failedChecks > 0) {
+                console.error(`${script} failed ${failedChecks} k6 check(s).`);
+                process.exit(1);
+              }
+            ' "artifacts/k6/${safe_name}-summary.json" "${script}"
+
+            echo "::endgroup::"
+          }
+
+          for script in "${google_scripts[@]}"; do
+            run_k6_script "${script}"
+          done
+
+          if [[ -z "${DWH_INGESTION_URL:-}" ]]; then
+            echo "::warning::DWH_INGESTION_URL secret is not configured. Skipping DWH k6 tests."
+          else
+            for script in "${dwh_scripts[@]}"; do
+              run_k6_script "${script}"
+            done
+          fi
+
+      - name: Upload k6 artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k6-test-results-${{ github.run_id }}
+          path: artifacts/k6/
+          if-no-files-found: warn
+          retention-days: 14
