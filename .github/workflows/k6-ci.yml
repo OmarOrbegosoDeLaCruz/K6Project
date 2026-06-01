@@ -2,11 +2,10 @@ name: k6 CI
 
 on:
   pull_request:
-    branches:
-      - main
     paths:
       - "Framework/**"
       - "Tests/**"
+      - "Reports/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/k6-ci.yml"
@@ -67,6 +66,7 @@ jobs:
           set -euo pipefail
 
           mkdir -p artifacts/k6
+          mkdir -p Reports/html Reports/json/latest
 
           google_scripts=(
             "Tests/Google/loadTest.js"
@@ -84,14 +84,25 @@ jobs:
           run_k6_script() {
             local script="$1"
             safe_name="${script//\//__}"
+            safe_name="${safe_name%.js}"
+            local failed=0
             echo "::group::k6 run ${script}"
 
-            k6 run \
+            set +e
+            K6_REPORT_NAME="${safe_name}" k6 run \
               --vus 1 \
               --iterations 1 \
               --summary-export "artifacts/k6/${safe_name}-summary.json" \
               "${script}" | tee "artifacts/k6/${safe_name}.log"
+            local k6_exit=${PIPESTATUS[0]}
+            set -e
 
+            if [[ "${k6_exit}" -ne 0 ]]; then
+              echo "::error::${script} exited with status ${k6_exit}."
+              failed=1
+            fi
+
+            set +e
             node -e '
               const fs = require("fs");
               const [summaryPath, script] = process.argv.slice(1);
@@ -104,27 +115,49 @@ jobs:
                 process.exit(1);
               }
             ' "artifacts/k6/${safe_name}-summary.json" "${script}"
+            local check_exit=$?
+            set -e
+
+            if [[ "${check_exit}" -ne 0 ]]; then
+              failed=1
+            fi
 
             echo "::endgroup::"
+            return "${failed}"
           }
 
+          failed_runs=0
+
           for script in "${google_scripts[@]}"; do
-            run_k6_script "${script}"
+            run_k6_script "${script}" || failed_runs=1
           done
+
+          node Framework/reporting/suiteReport.js \
+            --suite-name "Google k6 Suite" \
+            --output-dir Reports/html \
+            --include Reports/json/latest/Tests__Google__loadTest.json \
+            --include Reports/json/latest/Tests__Google__stressTest.json \
+            --include Reports/json/latest/Tests__Google__spikeTest.json \
+            --include Reports/json/latest/Tests__Google__soakTest.json
 
           if [[ -z "${DWH_INGESTION_URL:-}" ]]; then
             echo "::warning::DWH_INGESTION_URL secret is not configured. Skipping DWH k6 tests."
           else
             for script in "${dwh_scripts[@]}"; do
-              run_k6_script "${script}"
+              run_k6_script "${script}" || failed_runs=1
             done
           fi
+
+          exit "${failed_runs}"
 
       - name: Upload k6 artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: k6-test-results-${{ github.run_id }}
-          path: artifacts/k6/
+          path: |
+            artifacts/k6/
+            Reports/html/
+            Reports/json/
           if-no-files-found: warn
           retention-days: 14
