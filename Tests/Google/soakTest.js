@@ -1,23 +1,8 @@
-import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { runGoogleHomePageFlow } from '../../Framework/flows/googleFlow.js';
+import { googleWebProfiles } from '../../Framework/config/thresholds.js';
 
-export const options = {
-  stages: [
-    { duration: '5m', target: 2000 },
-    { duration: '8h', target: 2000 },
-    { duration: '5m', target: 0 },
-  ],
-  thresholds: {
-    http_req_duration: ['p(30)<300'],
-  },
-};
+export const options = googleWebProfiles.soak;
 
 export default function () {
-  const res = http.get('https://www.google.com/');
-
-  check(res, {
-    '200': (r) => r.status === 200,
-  });
-
-  sleep(1);
+  runGoogleHomePageFlow();
 }
