@@ -1,0 +1,9 @@
+node_modules/
+artifacts/
+
+Reports/html/*.html
+Reports/json/*.json
+Reports/json/latest/*.json
+!Reports/html/.gitkeep
+!Reports/json/.gitkeep
+!Reports/json/latest/.gitkeep
